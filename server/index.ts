@@ -196,7 +196,15 @@ export function createApp(
         res.json(guarded);
       } catch (error) {
         if (error instanceof UpstreamError) {
-          console.error(`[api] analyze-enquiry failed: HTTP ${error.status}`);
+          const upstream =
+            error.upstreamStatus === undefined
+              ? 'n/a'
+              : String(error.upstreamStatus);
+          const duration =
+            error.durationMs === undefined ? 'n/a' : String(error.durationMs);
+          console.error(
+            `[api] analyze-enquiry failed: HTTP ${error.status} upstream=${upstream} type=${error.errorName ?? 'n/a'} requestId=${error.requestId ?? 'n/a'} durationMs=${duration}`,
+          );
           res.status(error.status).json({ error: error.message });
           return;
         }

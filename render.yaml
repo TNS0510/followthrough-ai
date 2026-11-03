@@ -2,6 +2,7 @@ services:
   - type: web
     name: followthrough-ai
     runtime: node
+    plan: free
     buildCommand: npm ci && npm run build && npm run build:server
     startCommand: npm start
     healthCheckPath: /api/health

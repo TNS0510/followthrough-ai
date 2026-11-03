@@ -1,20 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import {
-  FollowUpStoreError,
   createFollowUp,
   isOverdue,
-  loadFollowUps,
-  saveFollowUps,
   toFollowUpView,
   updateFollowUp,
   validateFollowUpPatch,
@@ -47,15 +35,6 @@ function storedFollowUp(overrides: Partial<FollowUp> = {}): FollowUp {
     updatedAt: '2026-10-30T10:00:00.000Z',
     ...overrides,
   };
-}
-
-function makeTempStore(): { dir: string; storePath: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'followups-test-'));
-  return { dir, storePath: join(dir, 'nested', 'followups.json') };
-}
-
-function removeTempDir(dir: string): void {
-  rmSync(dir, { recursive: true, force: true });
 }
 
 describe('follow-up model and storage', () => {
@@ -120,58 +99,6 @@ describe('follow-up model and storage', () => {
       validateFollowUpPatch({ dueAt: 'not a date' }).ok,
       false,
     );
-  });
-
-  it('missing store file loads as an empty list', () => {
-    const { dir, storePath } = makeTempStore();
-    try {
-      assert.deepEqual(loadFollowUps(storePath), []);
-    } finally {
-      removeTempDir(dir);
-    }
-  });
-
-  it('corrupted store files throw instead of returning empty', () => {
-    const cases: Array<{ label: string; contents: string }> = [
-      { label: 'invalid JSON', contents: '{oops' },
-      { label: 'non-array JSON', contents: '{"a":1}' },
-      {
-        label: 'bad record shape',
-        contents: JSON.stringify([{ id: 'x' }]),
-      },
-      {
-        label: 'stored overdue status',
-        contents: JSON.stringify([
-          storedFollowUp({ status: 'overdue' as 'pending' }),
-        ]),
-      },
-    ];
-    for (const { label, contents } of cases) {
-      const { dir, storePath } = makeTempStore();
-      try {
-        mkdirSync(dirname(storePath), { recursive: true });
-        writeFileSync(storePath, contents, 'utf8');
-        assert.throws(() => loadFollowUps(storePath), FollowUpStoreError, label);
-      } finally {
-        removeTempDir(dir);
-      }
-    }
-  });
-
-  it('round-trips records through save and load', () => {
-    const { dir, storePath } = makeTempStore();
-    try {
-      const records = [
-        storedFollowUp({ id: 'a' }),
-        storedFollowUp({ id: 'b', status: 'completed', notes: 'Done.' }),
-      ];
-      saveFollowUps(storePath, records);
-      assert.deepEqual(loadFollowUps(storePath), records);
-      const files = readdirSync(join(dir, 'nested'));
-      assert.deepEqual(files, ['followups.json']);
-    } finally {
-      removeTempDir(dir);
-    }
   });
 
   it('completing preserves notes and rescheduling preserves identity', () => {

@@ -1,9 +1,11 @@
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Request, Response } from 'express';
+import { createApp } from './index.js';
+import { FollowUpStoreError } from './followups.js';
+import type { FollowUp, FollowUpPatch, NewFollowUp } from './followups.js';
+import { InMemoryFollowUpStore } from './followupStore.js';
+import type { FollowUpFilters, FollowUpStore } from './followupStore.js';
 
 interface TestableApp {
   handle: (
@@ -98,11 +100,6 @@ async function withTimeout(
 }
 
 let app: TestableApp;
-let dir = '';
-
-function storePath(): string {
-  return join(dir, 'followups.json');
-}
 
 async function dispatch(
   method: string,
@@ -114,6 +111,9 @@ async function dispatch(
     method,
     url,
     headers: {},
+    // The AI rate limiters read the socket peer address, like
+    // server/rateLimit.test.ts; follow-up and health paths ignore it.
+    socket: { remoteAddress: '127.0.0.1' },
     _body: true,
     body,
   };
@@ -145,21 +145,40 @@ function followUpList(payload: unknown): FollowUpPayload[] {
   return (payload as { followUps: FollowUpPayload[] }).followUps;
 }
 
+const SECRET_MARKER = 'SECRET-should-never-appear-in-logs-or-responses';
+
+// Simulates the production PostgreSQL store failing: logs once with a
+// generic message (never the internal detail), then throws generic.
+class FailingStore implements FollowUpStore {
+  async list(filters?: FollowUpFilters): Promise<FollowUp[]> {
+    void filters;
+    const internalDetail = `simulated db failure (${SECRET_MARKER})`;
+    void internalDetail;
+    console.error('[followupStore] postgres list failed');
+    throw new FollowUpStoreError('Unable to access follow-up storage.');
+  }
+
+  async create(input: NewFollowUp): Promise<FollowUp> {
+    void input;
+    console.error('[followupStore] postgres create failed');
+    throw new FollowUpStoreError('Unable to access follow-up storage.');
+  }
+
+  async update(id: string, patch: FollowUpPatch): Promise<FollowUp | null> {
+    void id;
+    void patch;
+    console.error('[followupStore] postgres update failed');
+    throw new FollowUpStoreError('Unable to access follow-up storage.');
+  }
+}
+
 describe('follow-up api routes', () => {
-  before(async () => {
-    dir = mkdtempSync(join(tmpdir(), 'followups-routes-test-'));
-    process.env.FOLLOWUPS_FILE = storePath();
-    const module = await import('./index.js');
-    app = module.default as unknown as TestableApp;
-  });
-
-  after(() => {
-    delete process.env.FOLLOWUPS_FILE;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
   beforeEach(() => {
-    writeFileSync(storePath(), '[]', 'utf8');
+    // This suite exercises the handlers, so it opts into the routes that
+    // are disabled by default (see 'follow-up route gating' below).
+    app = createApp(new InMemoryFollowUpStore(), {
+      enableFollowups: true,
+    }) as unknown as TestableApp;
   });
 
   it('returns an empty list when no follow-ups exist', async () => {
@@ -288,25 +307,34 @@ describe('follow-up api routes', () => {
     assert.equal(status, 400);
   });
 
-  it('returns 500 with a clear error when storage is corrupted', async () => {
-    writeFileSync(storePath(), '{oops', 'utf8');
+  it('returns 500 with a clear error when storage fails', async () => {
+    app = createApp(new FailingStore(), {
+      enableFollowups: true,
+    }) as unknown as TestableApp;
     const listed = await dispatch('GET', '/api/followups');
     assert.equal(listed.status, 500);
-    const listedError = (listed.payload as { error: unknown }).error;
-    assert.ok(typeof listedError === 'string' && listedError !== '');
+    assert.equal(
+      (listed.payload as { error: unknown }).error,
+      'Unable to access follow-up storage. Please try again later.',
+    );
     const created = await dispatch('POST', '/api/followups', validBody());
     assert.equal(created.status, 500);
+    assert.equal(
+      (created.payload as { error: unknown }).error,
+      'Unable to access follow-up storage. Please try again later.',
+    );
   });
 
-  it('does not expose filesystem details in storage errors', async () => {
-    const previous = process.env.FOLLOWUPS_FILE;
-    process.env.FOLLOWUPS_FILE = dir;
+  it('does not expose storage details in errors and logs once', async () => {
     const logged: string[] = [];
     const originalError = console.error;
     console.error = (...args: unknown[]): void => {
       logged.push(args.map((part) => String(part)).join(' '));
     };
     try {
+      app = createApp(new FailingStore(), {
+        enableFollowups: true,
+      }) as unknown as TestableApp;
       const { status, payload } = await dispatch('GET', '/api/followups');
       assert.equal(status, 500);
       const message = (payload as { error: unknown }).error;
@@ -314,17 +342,120 @@ describe('follow-up api routes', () => {
         message,
         'Unable to access follow-up storage. Please try again later.',
       );
-      assert.ok(!String(message).includes(dir));
-      assert.ok(
-        logged.some((line) => line.includes('Could not read follow-up store')),
-      );
+      assert.ok(!String(message).includes(SECRET_MARKER));
+      assert.equal(logged.length, 1);
+      assert.ok(!logged.some((line) => line.includes(SECRET_MARKER)));
     } finally {
       console.error = originalError;
-      if (previous === undefined) {
-        delete process.env.FOLLOWUPS_FILE;
-      } else {
-        process.env.FOLLOWUPS_FILE = previous;
-      }
+    }
+  });
+});
+
+describe('follow-up route gating', () => {
+  let savedEnv: string | undefined = undefined;
+
+  beforeEach(() => {
+    // Default-off tests must not depend on the ambient environment.
+    savedEnv = process.env.ENABLE_FOLLOWUPS;
+    delete process.env.ENABLE_FOLLOWUPS;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) {
+      delete process.env.ENABLE_FOLLOWUPS;
+    } else {
+      process.env.ENABLE_FOLLOWUPS = savedEnv;
+    }
+  });
+
+  it('denies read, create, and update when disabled by default', async () => {
+    // Production-like default: no option, no env. The shared store holds a
+    // real record, proving the 404s come from gating, not empty storage.
+    const store = new InMemoryFollowUpStore();
+    const enabled = createApp(store, {
+      enableFollowups: true,
+    }) as unknown as TestableApp;
+    app = enabled;
+    const seeded = singleFollowUp(
+      (await dispatch('POST', '/api/followups', validBody())).payload,
+    );
+    app = createApp(store) as unknown as TestableApp;
+    const listed = await dispatch('GET', '/api/followups');
+    assert.equal(listed.status, 404);
+    assert.deepEqual(listed.payload, { error: 'Not found.' });
+    const created = await dispatch(
+      'POST',
+      '/api/followups',
+      validBody({ enquiryId: 'enq-2' }),
+    );
+    assert.equal(created.status, 404);
+    assert.deepEqual(created.payload, { error: 'Not found.' });
+    const updated = await dispatch('PATCH', `/api/followups/${seeded.id}`, {
+      status: 'completed',
+    });
+    assert.equal(updated.status, 404);
+    assert.deepEqual(updated.payload, { error: 'Not found.' });
+    // Nothing changed in storage: still one pending record.
+    app = enabled;
+    const { payload } = await dispatch('GET', '/api/followups');
+    const rows = followUpList(payload);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(
+      rows.map((row) => row.status),
+      ['pending'],
+    );
+  });
+
+  it('enables routes when ENABLE_FOLLOWUPS is true', async () => {
+    process.env.ENABLE_FOLLOWUPS = 'true';
+    app = createApp(new InMemoryFollowUpStore()) as unknown as TestableApp;
+    const listed = await dispatch('GET', '/api/followups');
+    assert.equal(listed.status, 200);
+    assert.deepEqual(followUpList(listed.payload), []);
+    const created = await dispatch('POST', '/api/followups', validBody());
+    assert.equal(created.status, 201);
+  });
+
+  it('keeps routes disabled for other ENABLE_FOLLOWUPS values', async () => {
+    process.env.ENABLE_FOLLOWUPS = 'yes';
+    app = createApp(new InMemoryFollowUpStore()) as unknown as TestableApp;
+    const { status, payload } = await dispatch('GET', '/api/followups');
+    assert.equal(status, 404);
+    assert.deepEqual(payload, { error: 'Not found.' });
+  });
+
+  it('leaves health and analyze routes working when disabled', async () => {
+    app = createApp(new InMemoryFollowUpStore()) as unknown as TestableApp;
+    const health = await dispatch('GET', '/api/health');
+    assert.equal(health.status, 200);
+    assert.deepEqual(health.payload, { status: 'ok' });
+    // 400 proves the AI route is reachable: the request passed the rate
+    // limiters and was rejected by request validation instead.
+    const analyzed = await dispatch('POST', '/api/analyze-enquiry', {});
+    assert.equal(analyzed.status, 400);
+  });
+
+  it('exposes no credentials or internals in disabled responses', async () => {
+    app = createApp(new InMemoryFollowUpStore()) as unknown as TestableApp;
+    const { status, payload } = await dispatch('GET', '/api/followups');
+    assert.equal(status, 404);
+    assert.deepEqual(payload, { error: 'Not found.' });
+    const text = JSON.stringify(payload).toLowerCase();
+    for (const leaked of [
+      'database',
+      'postgres',
+      'database_url',
+      'secret',
+      'stack',
+      'followup',
+      'follow_up',
+      'store',
+      'internal',
+    ]) {
+      assert.ok(
+        !text.includes(leaked),
+        `response leaks implementation detail: ${leaked}`,
+      );
     }
   });
 });

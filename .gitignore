@@ -27,3 +27,14 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Generated data and server build output
+data/
+dist-server/
+
+# Local conversation transcript — never publish
+conversation-2026-10-31-132502.txt
+
+# Generated test and TypeScript build artifacts
+coverage/
+*.tsbuildinfo

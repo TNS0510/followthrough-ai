@@ -1,4 +1,5 @@
 import OpenAI, {
+  APIConnectionError,
   APIConnectionTimeoutError,
   APIError,
   AuthenticationError,
@@ -14,6 +15,7 @@ export interface UpstreamErrorDiagnostics {
   readonly errorName?: string;
   readonly requestId?: string;
   readonly durationMs?: number;
+  readonly transport?: string;
   readonly cause?: unknown;
 }
 
@@ -23,6 +25,7 @@ export class UpstreamError extends Error {
   readonly errorName?: string;
   readonly requestId?: string;
   readonly durationMs?: number;
+  readonly transport?: string;
 
   constructor(
     status: number,
@@ -36,6 +39,7 @@ export class UpstreamError extends Error {
     this.errorName = diagnostics.errorName;
     this.requestId = diagnostics.requestId;
     this.durationMs = diagnostics.durationMs;
+    this.transport = diagnostics.transport;
   }
 }
 
@@ -67,6 +71,133 @@ function sanitizeRequestId(value: unknown): string | undefined {
   return singleLine.slice(0, MAX_REQUEST_ID_LENGTH);
 }
 
+// Connection-failure diagnostics. Only allowlisted transport fields are ever
+// read (code, errno, syscall, cause presence/name/code). Messages, hostnames,
+// headers, bodies, and keys are never read, so they cannot leak into logs.
+const MAX_CAUSE_DEPTH = 3;
+
+function sanitizeTransportCode(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '' || !/^[A-Za-z0-9_.-]{1,64}$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function sanitizeSyscall(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed === '' || !/^[A-Za-z0-9_]{1,32}$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function sanitizeErrno(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || Math.abs(value) > 999999) {
+      return undefined;
+    }
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed === '' || !/^[A-Za-z0-9_.-]{1,16}$/.test(trimmed)) {
+      return undefined;
+    }
+    return trimmed;
+  }
+  return undefined;
+}
+
+function readField(value: object, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function readCause(value: object): unknown {
+  try {
+    return (value as { cause?: unknown }).cause;
+  } catch {
+    return undefined;
+  }
+}
+
+// Follows the cause chain with a depth bound and cycle guard. Returns the
+// visited objects starting with the top-level error.
+function collectCauseChain(error: object): object[] {
+  const chain: object[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (
+    typeof current === 'object' &&
+    current !== null &&
+    chain.length <= MAX_CAUSE_DEPTH &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    chain.push(current);
+    const cause = readCause(current);
+    if (typeof cause !== 'object' || cause === null) {
+      break;
+    }
+    current = cause;
+  }
+  return chain;
+}
+
+function firstInChain(
+  chain: object[],
+  start: number,
+  sanitize: (value: unknown) => string | undefined,
+  key: string,
+): string | undefined {
+  for (let index = start; index < chain.length; index += 1) {
+    const value = sanitize(readField(chain[index] as object, key));
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+// Builds the log-ready transport fragment for API connection failures, or
+// undefined for anything else. Never throws: diagnostics must not break
+// error handling.
+export function collectTransportDiagnostic(error: unknown): string | undefined {
+  if (!(error instanceof APIConnectionError)) {
+    return undefined;
+  }
+  try {
+    const chain = collectCauseChain(error);
+    const cause = readCause(error);
+    const hasCause = cause !== undefined && cause !== null;
+    const causeName =
+      cause instanceof Error
+        ? sanitizeErrorName(cause.constructor.name)
+        : undefined;
+    const code = firstInChain(chain, 0, sanitizeTransportCode, 'code');
+    const errno = firstInChain(chain, 0, sanitizeErrno, 'errno');
+    const syscall = firstInChain(chain, 0, sanitizeSyscall, 'syscall');
+    const causeCode = firstInChain(chain, 1, sanitizeTransportCode, 'code');
+    return (
+      `code=${code ?? 'n/a'} errno=${errno ?? 'n/a'} ` +
+      `syscall=${syscall ?? 'n/a'} hasCause=${hasCause} ` +
+      `cause=${causeName ?? 'n/a'} causeCode=${causeCode ?? 'n/a'}`
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 function collectDiagnostics(
   error: unknown,
   durationMs: number,
@@ -90,6 +221,7 @@ function collectDiagnostics(
     errorName,
     requestId,
     durationMs,
+    transport: collectTransportDiagnostic(error),
     cause: error,
   };
 }
@@ -182,6 +314,7 @@ function toUpstreamError(error: unknown, durationMs: number): UpstreamError {
       errorName: error.errorName ?? 'UpstreamError',
       requestId: error.requestId,
       durationMs,
+      transport: error.transport,
       cause: error.cause ?? error,
     });
   }

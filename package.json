@@ -11,7 +11,7 @@
     "start": "node dist-server/index.js",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "tsx --test server/commitments.test.ts server/followups.test.ts server/followups.routes.test.ts server/followupStore.test.ts server/static.test.ts server/rateLimit.test.ts",
+    "test": "tsx --test server/commitments.test.ts server/followups.test.ts server/followups.routes.test.ts server/followupStore.test.ts server/static.test.ts server/rateLimit.test.ts server/metaClient.test.ts",
     "test:integration": "tsx --test server/followups.integration.test.ts"
   },
   "dependencies": {

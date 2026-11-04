@@ -202,8 +202,10 @@ export function createApp(
               : String(error.upstreamStatus);
           const duration =
             error.durationMs === undefined ? 'n/a' : String(error.durationMs);
+          const transport =
+            error.transport === undefined ? '' : ` ${error.transport}`;
           console.error(
-            `[api] analyze-enquiry failed: HTTP ${error.status} upstream=${upstream} type=${error.errorName ?? 'n/a'} requestId=${error.requestId ?? 'n/a'} durationMs=${duration}`,
+            `[api] analyze-enquiry failed: HTTP ${error.status} upstream=${upstream} type=${error.errorName ?? 'n/a'} requestId=${error.requestId ?? 'n/a'} durationMs=${duration}${transport}`,
           );
           res.status(error.status).json({ error: error.message });
           return;

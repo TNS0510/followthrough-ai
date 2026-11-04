@@ -8,7 +8,7 @@ import OpenAI, {
 
 const META_BASE_URL = 'https://api.meta.ai/v1';
 const MODEL = 'muse-spark-1.3';
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 45_000;
 
 export interface UpstreamErrorDiagnostics {
   readonly upstreamStatus?: number;

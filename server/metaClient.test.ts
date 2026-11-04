@@ -104,6 +104,74 @@ describe('collectTransportDiagnostic', () => {
       'code=n/a errno=n/a syscall=n/a hasCause=true cause=Error causeCode=n/a',
     );
   });
+
+  it('captures DOMException AbortError name and numeric code', () => {
+    const root = new APIConnectionTimeoutError({ message: 'Request timed out.' });
+    Object.assign(root, {
+      cause: new DOMException('This operation was aborted.', 'AbortError'),
+    });
+    assert.equal(
+      collectTransportDiagnostic(root),
+      'code=20 errno=n/a syscall=n/a hasCause=true cause=AbortError causeCode=20',
+    );
+  });
+
+  it('accepts small numeric codes and rejects invalid ones', () => {
+    const ok = new APIConnectionError({ message: 'Connection error.' });
+    Object.assign(ok, { code: 9999 });
+    assert.equal(
+      collectTransportDiagnostic(ok),
+      'code=9999 errno=n/a syscall=n/a hasCause=false cause=n/a causeCode=n/a',
+    );
+
+    for (const code of [10000, -1, Number.NaN, 1.5]) {
+      const bad = new APIConnectionError({ message: 'Connection error.' });
+      Object.assign(bad, { code });
+      assert.equal(
+        collectTransportDiagnostic(bad),
+        'code=n/a errno=n/a syscall=n/a hasCause=false cause=n/a causeCode=n/a',
+      );
+    }
+  });
+
+  it('prefers the actual name but keeps the constructor fallback', () => {
+    const custom = new APIConnectionTimeoutError();
+    const renamed = new TypeError('renamed');
+    renamed.name = 'CustomName';
+    Object.assign(custom, { cause: renamed });
+    assert.equal(
+      collectTransportDiagnostic(custom),
+      'code=n/a errno=n/a syscall=n/a hasCause=true cause=CustomName causeCode=n/a',
+    );
+
+    const garbage = new APIConnectionTimeoutError();
+    const spoofed = new TypeError('spoofed');
+    spoofed.name = 'not a valid name!!';
+    Object.assign(garbage, { cause: spoofed });
+    assert.equal(
+      collectTransportDiagnostic(garbage),
+      'code=n/a errno=n/a syscall=n/a hasCause=true cause=TypeError causeCode=n/a',
+    );
+  });
+
+  it('handles a cause without a name', () => {
+    const root = new APIConnectionTimeoutError();
+    Object.assign(root, { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+    assert.equal(
+      collectTransportDiagnostic(root),
+      'code=UND_ERR_CONNECT_TIMEOUT errno=n/a syscall=n/a ' +
+        'hasCause=true cause=n/a causeCode=UND_ERR_CONNECT_TIMEOUT',
+    );
+  });
+
+  it('treats a null cause as missing', () => {
+    const root = new APIConnectionTimeoutError();
+    Object.assign(root, { cause: null });
+    assert.equal(
+      collectTransportDiagnostic(root),
+      'code=n/a errno=n/a syscall=n/a hasCause=false cause=n/a causeCode=n/a',
+    );
+  });
 });
 
 describe('UpstreamError transport plumbing', () => {

@@ -77,6 +77,14 @@ function sanitizeRequestId(value: unknown): string | undefined {
 const MAX_CAUSE_DEPTH = 3;
 
 function sanitizeTransportCode(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    // Numeric codes come from DOMException (legacy range 1-25). Accept only
+    // small non-negative integers.
+    if (!Number.isSafeInteger(value) || value < 0 || value > 9999) {
+      return undefined;
+    }
+    return String(value);
+  }
   if (typeof value !== 'string') {
     return undefined;
   }
@@ -180,9 +188,13 @@ export function collectTransportDiagnostic(error: unknown): string | undefined {
     const chain = collectCauseChain(error);
     const cause = readCause(error);
     const hasCause = cause !== undefined && cause !== null;
+    // Prefer the cause's own name: a DOMException reports AbortError here
+    // while its constructor is just DOMException. Falls back to the
+    // constructor name. Both pass through the same allowlist.
     const causeName =
       cause instanceof Error
-        ? sanitizeErrorName(cause.constructor.name)
+        ? (sanitizeErrorName(readField(cause, 'name')) ??
+          sanitizeErrorName(cause.constructor.name))
         : undefined;
     const code = firstInChain(chain, 0, sanitizeTransportCode, 'code');
     const errno = firstInChain(chain, 0, sanitizeErrno, 'errno');

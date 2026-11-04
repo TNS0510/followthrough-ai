@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 
@@ -378,20 +378,64 @@ function DraftCard({ enquiry, reviewed, onReview }: DraftCardProps) {
   )
 }
 
+interface SavedDraftCardProps {
+  draft: SavedDraft
+  onReview: () => void
+}
+
+function SavedDraftCard({ draft, onReview }: SavedDraftCardProps) {
+  const excerpt =
+    draft.body.length > 140
+      ? `${draft.body.slice(0, 140).trimEnd()}…`
+      : draft.body
+  const contact = [draft.customer, draft.company, draft.channel]
+    .filter((part) => part !== '')
+    .join(' · ')
+  return (
+    <article className="enquiry">
+      <div className="enquiry-head">
+        <h3>{draft.subject}</h3>
+        <span className="received">{formatSavedAt(draft.savedAt)}</span>
+      </div>
+      <p className="enquiry-meta">{contact}</p>
+      <p className="enquiry-summary">{excerpt}</p>
+      <div className="label-row">
+        <span className="label status-new">AI-generated</span>
+        {draft.reviewed ? (
+          <span className="label reviewed">Draft reviewed</span>
+        ) : (
+          <span className="label status-awaiting">Awaiting review</span>
+        )}
+      </div>
+      <button type="button" className="review-button" onClick={onReview}>
+        Review draft
+      </button>
+    </article>
+  )
+}
+
 interface DraftsPageProps {
   reviewedIds: string[]
+  savedDrafts: SavedDraft[]
   onReview: (id: string) => void
 }
 
-function DraftsPage({ reviewedIds, onReview }: DraftsPageProps) {
+function DraftsPage({ reviewedIds, savedDrafts, onReview }: DraftsPageProps) {
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('All')
 
-  const visible = enquiries.filter((enquiry) => {
+  const visibleSaved = savedDrafts.filter((draft) => {
+    if (reviewFilter === 'Reviewed') return draft.reviewed
+    if (reviewFilter === 'Awaiting review') return !draft.reviewed
+    return true
+  })
+  const visibleSamples = enquiries.filter((enquiry) => {
     const isReviewed = reviewedIds.includes(enquiry.id)
     if (reviewFilter === 'Reviewed') return isReviewed
     if (reviewFilter === 'Awaiting review') return !isReviewed
     return true
   })
+  const shown = visibleSaved.length + visibleSamples.length
+  const total = savedDrafts.length + enquiries.length
 
   return (
     <section aria-label="All drafts">
@@ -412,39 +456,87 @@ function DraftsPage({ reviewedIds, onReview }: DraftsPageProps) {
         </select>
       </div>
       <p className="result-count">
-        Showing {visible.length} of {enquiries.length} drafts
+        Showing {shown} of {total} drafts
       </p>
-      {visible.length === 0 ? (
+      {shown === 0 ? (
         <p className="empty-state">No drafts match this filter.</p>
       ) : (
-        <div className="enquiry-list">
-          {visible.map((enquiry) => (
-            <DraftCard
-              key={enquiry.id}
-              enquiry={enquiry}
-              reviewed={reviewedIds.includes(enquiry.id)}
-              onReview={() => onReview(enquiry.id)}
-            />
-          ))}
-        </div>
+        <>
+          {visibleSaved.length > 0 && (
+            <section
+              aria-label="AI-generated drafts"
+              style={{ marginBottom: '32px' }}
+            >
+              <h3>Saved from AI analysis</h3>
+              <p className="draft-note">
+                AI-generated drafts are stored only in this browser. This is a
+                fictional demonstration feature, not secure multi-user storage.
+              </p>
+              <div className="enquiry-list">
+                {visibleSaved.map((draft) => (
+                  <SavedDraftCard
+                    key={draft.id}
+                    draft={draft}
+                    onReview={() => onReview(draft.id)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+          {visibleSamples.length > 0 && (
+            <>
+              {savedDrafts.length > 0 && <h3>Sample drafts</h3>}
+              <div className="enquiry-list">
+                {visibleSamples.map((enquiry) => (
+                  <DraftCard
+                    key={enquiry.id}
+                    enquiry={enquiry}
+                    reviewed={reviewedIds.includes(enquiry.id)}
+                    onReview={() => onReview(enquiry.id)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
     </section>
   )
 }
 
+type DraftModalSource =
+  | { kind: 'sample'; enquiry: Enquiry }
+  | { kind: 'saved'; draft: SavedDraft }
+
 interface DraftModalProps {
-  enquiry: Enquiry
+  source: DraftModalSource
   reviewed: boolean
   onMarkReviewed: () => void
+  onSaveEdit: ((body: string) => void) | null
   onClose: () => void
 }
 
+type CopyState = 'idle' | 'copied' | 'failed'
+
 function DraftModal({
-  enquiry,
+  source,
   reviewed,
   onMarkReviewed,
+  onSaveEdit,
   onClose,
 }: DraftModalProps) {
+  const body =
+    source.kind === 'saved' ? source.draft.body : source.enquiry.draft
+  const contact =
+    source.kind === 'saved'
+      ? [source.draft.customer, source.draft.company, source.draft.channel]
+          .filter((part) => part !== '')
+          .join(' · ')
+      : ''
+  const [editing, setEditing] = useState(false)
+  const [editText, setEditText] = useState(body)
+  const [copyState, setCopyState] = useState<CopyState>('idle')
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -452,6 +544,38 @@ function DraftModal({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  const canEdit = source.kind === 'saved' && onSaveEdit !== null
+  const trimmedEdit = editText.trim()
+  const canSaveEdit =
+    trimmedEdit !== '' &&
+    trimmedEdit.length <= MAX_DRAFT_BODY &&
+    trimmedEdit !== body
+
+  const startEdit = () => {
+    setEditText(body)
+    setCopyState('idle')
+    setEditing(true)
+  }
+
+  const cancelEdit = () => {
+    setEditText(body)
+    setCopyState('idle')
+    setEditing(false)
+  }
+
+  const saveEdit = () => {
+    if (!canSaveEdit || onSaveEdit === null) {
+      return
+    }
+    onSaveEdit(trimmedEdit)
+    setCopyState('idle')
+    setEditing(false)
+  }
+
+  const copyBody = async () => {
+    setCopyState((await copyToClipboard(body)) ? 'copied' : 'failed')
+  }
 
   return (
     <div
@@ -467,30 +591,212 @@ function DraftModal({
         onClick={(event) => event.stopPropagation()}
       >
         <h2 id="draft-title">Draft response</h2>
-        <p className="enquiry-meta">
-          To: {enquiry.customer} &middot; {enquiry.company} &middot;{' '}
-          {enquiry.channel}
-        </p>
-        <p className="draft-text">{enquiry.draft}</p>
-        <p className="draft-note">
-          Preview only. Nothing is sent from this screen.
-        </p>
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="button-primary"
-            onClick={onMarkReviewed}
-            disabled={reviewed}
-          >
-            {reviewed ? 'Reviewed' : 'Mark reviewed'}
-          </button>
-          <button type="button" className="button-secondary" onClick={onClose}>
-            Close
-          </button>
-        </div>
+        {source.kind === 'saved' ? (
+          <>
+            <p className="enquiry-meta">To: {contact}</p>
+            <p className="enquiry-meta">
+              AI-generated &middot; {formatSavedAt(source.draft.savedAt)}
+            </p>
+          </>
+        ) : (
+          <p className="enquiry-meta">
+            To: {source.enquiry.customer} &middot; {source.enquiry.company}{' '}
+            &middot; {source.enquiry.channel}
+          </p>
+        )}
+        {editing ? (
+          <>
+            <div className="field">
+              <label htmlFor="draft-edit">Draft text</label>
+              <textarea
+                id="draft-edit"
+                value={editText}
+                maxLength={MAX_DRAFT_BODY}
+                rows={8}
+                onChange={(event) => setEditText(event.target.value)}
+              />
+            </div>
+            <p className="draft-note">
+              {trimmedEdit.length} / {MAX_DRAFT_BODY} characters
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="draft-text">{body}</p>
+            <p className="draft-note">
+              Preview only. Nothing is sent from this screen.
+            </p>
+          </>
+        )}
+        {editing ? (
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="button-primary"
+              onClick={saveEdit}
+              disabled={!canSaveEdit}
+            >
+              Save changes
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={cancelEdit}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="button-primary"
+              onClick={onMarkReviewed}
+              disabled={reviewed}
+            >
+              {reviewed ? 'Reviewed' : 'Mark reviewed'}
+            </button>
+            {canEdit && (
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={startEdit}
+              >
+                Edit
+              </button>
+            )}
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={copyBody}
+            >
+              {copyState === 'copied'
+                ? 'Copied'
+                : copyState === 'failed'
+                  ? 'Copy failed'
+                  : 'Copy'}
+            </button>
+            <button type="button" className="button-secondary" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
+}
+
+interface SavedDraft {
+  id: string
+  customer: string
+  company: string
+  channel: string
+  subject: string
+  body: string
+  savedAt: string
+  reviewed: boolean
+}
+
+interface NewSavedDraft {
+  customer: string
+  company: string
+  channel: string
+  subject: string
+  body: string
+}
+
+const SAVED_DRAFTS_KEY = 'followthrough.savedDrafts.v1'
+const MAX_DRAFT_BODY = 4000
+const MAX_SAVED_DRAFTS = 50
+
+function isSavedDraft(value: unknown): value is SavedDraft {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.id === 'string' &&
+    record.id.startsWith('draft-') &&
+    typeof record.customer === 'string' &&
+    record.customer !== '' &&
+    typeof record.company === 'string' &&
+    typeof record.channel === 'string' &&
+    typeof record.subject === 'string' &&
+    record.subject !== '' &&
+    typeof record.body === 'string' &&
+    record.body !== '' &&
+    record.body.length <= MAX_DRAFT_BODY &&
+    typeof record.savedAt === 'string' &&
+    record.savedAt !== '' &&
+    typeof record.reviewed === 'boolean'
+  )
+}
+
+function loadSavedDrafts(): SavedDraft[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return []
+    }
+    const raw = window.localStorage.getItem(SAVED_DRAFTS_KEY)
+    if (raw === null || raw === '') {
+      return []
+    }
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed.filter(isSavedDraft).slice(0, MAX_SAVED_DRAFTS)
+  } catch {
+    return []
+  }
+}
+
+function createDraftId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `draft-${crypto.randomUUID()}`
+  }
+  return `draft-${Date.now()}-${Math.floor(Math.random() * 1000000)}`
+}
+
+function formatSavedAt(savedAt: string): string {
+  const time = new Date(savedAt).getTime()
+  if (Number.isNaN(time)) {
+    return 'Saved draft'
+  }
+  return `Saved ${new Date(time).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.clipboard !== 'undefined'
+    ) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Fall through to the legacy path below.
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.readOnly = true
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(area)
+    return copied
+  } catch {
+    return false
+  }
 }
 
 interface AnalysisResult {
@@ -532,9 +838,12 @@ function readErrorMessage(payload: unknown): string | null {
 
 interface AnalyzePageProps {
   initial: Enquiry | null
+  onSaveDraft: (draft: NewSavedDraft) => boolean
 }
 
-function AnalyzePage({ initial }: AnalyzePageProps) {
+type SaveStatus = 'idle' | 'stored' | 'memory-only'
+
+function AnalyzePage({ initial, onSaveDraft }: AnalyzePageProps) {
   const [customer, setCustomer] = useState(initial?.customer ?? '')
   const [company, setCompany] = useState(initial?.company ?? '')
   const [channel, setChannel] = useState(initial?.channel ?? '')
@@ -544,6 +853,8 @@ function AnalyzePage({ initial }: AnalyzePageProps) {
   const [status, setStatus] = useState<AnalyzeStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResult | null>(null)
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
+  const saveGuard = useRef(false)
 
   const loading = status === 'loading'
 
@@ -567,6 +878,8 @@ function AnalyzePage({ initial }: AnalyzePageProps) {
     setStatus('loading')
     setError(null)
     setResult(null)
+    setSaveStatus('idle')
+    saveGuard.current = false
     try {
       const response = await fetch('/api/analyze-enquiry', {
         method: 'POST',
@@ -602,6 +915,21 @@ function AnalyzePage({ initial }: AnalyzePageProps) {
       )
       setStatus('error')
     }
+  }
+
+  const saveToDrafts = () => {
+    if (saveGuard.current || result === null) {
+      return
+    }
+    saveGuard.current = true
+    const stored = onSaveDraft({
+      customer,
+      company,
+      channel,
+      subject,
+      body: result.draftResponse,
+    })
+    setSaveStatus(stored ? 'stored' : 'memory-only')
   }
 
   return (
@@ -744,6 +1072,28 @@ function AnalyzePage({ initial }: AnalyzePageProps) {
           <p className="draft-note">
             Preview only. Nothing is sent from this screen.
           </p>
+          {saveStatus === 'idle' ? (
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="button-primary"
+                onClick={saveToDrafts}
+              >
+                Save to Drafts
+              </button>
+            </div>
+          ) : saveStatus === 'stored' ? (
+            <p className="draft-note" role="status">
+              Saved to Drafts. Stored only in this browser — open the Drafts
+              page to review it.
+            </p>
+          ) : (
+            <p className="analyze-error" role="alert">
+              Browser storage is unavailable, so this draft is kept for this
+              session only and will disappear if you reload. It is listed in
+              Drafts until then.
+            </p>
+          )}
         </article>
       )}
     </section>
@@ -755,17 +1105,34 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [reviewedIds, setReviewedIds] = useState<string[]>([])
   const [analyzeId, setAnalyzeId] = useState<string | null>(null)
+  const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>(() =>
+    loadSavedDrafts(),
+  )
 
   const unresolved = enquiries.length
   const overdue = enquiries.filter(
     (enquiry) => enquiry.status === 'Overdue',
   ).length
-  const awaitingReview = enquiries.filter(
-    (enquiry) => !reviewedIds.includes(enquiry.id),
-  ).length
+  const awaitingReview =
+    enquiries.filter((enquiry) => !reviewedIds.includes(enquiry.id)).length +
+    savedDrafts.filter((draft) => !draft.reviewed).length
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SAVED_DRAFTS_KEY,
+        JSON.stringify(savedDrafts),
+      )
+    } catch {
+      // The session copy stays usable; the save action already reported
+      // whether browser storage accepted the draft.
+    }
+  }, [savedDrafts])
 
   const selected =
     enquiries.find((enquiry) => enquiry.id === selectedId) ?? null
+  const selectedSavedDraft =
+    savedDrafts.find((draft) => draft.id === selectedId) ?? null
 
   const analyzeSource =
     enquiries.find((enquiry) => enquiry.id === analyzeId) ?? null
@@ -773,6 +1140,43 @@ function App() {
   const markReviewed = (id: string) => {
     setReviewedIds((current) =>
       current.includes(id) ? current : [...current, id],
+    )
+  }
+
+  const handleSaveDraft = (input: NewSavedDraft): boolean => {
+    const draft: SavedDraft = {
+      ...input,
+      id: createDraftId(),
+      savedAt: new Date().toISOString(),
+      reviewed: false,
+    }
+    const next = [draft, ...savedDrafts].slice(0, MAX_SAVED_DRAFTS)
+    setSavedDrafts(next)
+    try {
+      window.localStorage.setItem(SAVED_DRAFTS_KEY, JSON.stringify(next))
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const handleUpdateDraft = (id: string, body: string) => {
+    const trimmed = body.trim()
+    if (trimmed === '' || trimmed.length > MAX_DRAFT_BODY) {
+      return
+    }
+    setSavedDrafts((current) =>
+      current.map((draft) =>
+        draft.id === id ? { ...draft, body: trimmed, reviewed: false } : draft,
+      ),
+    )
+  }
+
+  const markSavedDraftReviewed = (id: string) => {
+    setSavedDrafts((current) =>
+      current.map((draft) =>
+        draft.id === id ? { ...draft, reviewed: true } : draft,
+      ),
     )
   }
 
@@ -848,22 +1252,37 @@ function App() {
             <AnalyzePage
               key={analyzeSource?.id ?? 'new'}
               initial={analyzeSource}
+              onSaveDraft={handleSaveDraft}
             />
           ) : (
             <DraftsPage
               reviewedIds={reviewedIds}
+              savedDrafts={savedDrafts}
               onReview={(id) => setSelectedId(id)}
             />
           )}
         </main>
       </div>
-      {selected && (
+      {selectedSavedDraft ? (
         <DraftModal
-          enquiry={selected}
-          reviewed={reviewedIds.includes(selected.id)}
-          onMarkReviewed={() => markReviewed(selected.id)}
+          key={selectedSavedDraft.id}
+          source={{ kind: 'saved', draft: selectedSavedDraft }}
+          reviewed={selectedSavedDraft.reviewed}
+          onMarkReviewed={() => markSavedDraftReviewed(selectedSavedDraft.id)}
+          onSaveEdit={(body) => handleUpdateDraft(selectedSavedDraft.id, body)}
           onClose={() => setSelectedId(null)}
         />
+      ) : (
+        selected && (
+          <DraftModal
+            key={selected.id}
+            source={{ kind: 'sample', enquiry: selected }}
+            reviewed={reviewedIds.includes(selected.id)}
+            onMarkReviewed={() => markReviewed(selected.id)}
+            onSaveEdit={null}
+            onClose={() => setSelectedId(null)}
+          />
+        )
       )}
     </div>
   )

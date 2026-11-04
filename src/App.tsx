@@ -218,9 +218,10 @@ interface EnquiryCardProps {
   enquiry: Enquiry
   reviewed: boolean
   onReview: () => void
+  onAnalyze: () => void
 }
 
-function EnquiryCard({ enquiry, reviewed, onReview }: EnquiryCardProps) {
+function EnquiryCard({ enquiry, reviewed, onReview, onAnalyze }: EnquiryCardProps) {
   const overdue = enquiry.status === 'Overdue'
   return (
     <article className={overdue ? 'enquiry enquiry-overdue' : 'enquiry'}>
@@ -244,9 +245,14 @@ function EnquiryCard({ enquiry, reviewed, onReview }: EnquiryCardProps) {
       <p className="next-action">
         <strong>Next action:</strong> {enquiry.nextAction}
       </p>
-      <button type="button" className="review-button" onClick={onReview}>
-        Review draft
-      </button>
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <button type="button" className="review-button" onClick={onReview}>
+          Review draft
+        </button>
+        <button type="button" className="review-button" onClick={onAnalyze}>
+          Analyse
+        </button>
+      </div>
     </article>
   )
 }
@@ -254,9 +260,10 @@ function EnquiryCard({ enquiry, reviewed, onReview }: EnquiryCardProps) {
 interface EnquiriesPageProps {
   reviewedIds: string[]
   onReview: (id: string) => void
+  onAnalyze: (id: string) => void
 }
 
-function EnquiriesPage({ reviewedIds, onReview }: EnquiriesPageProps) {
+function EnquiriesPage({ reviewedIds, onReview, onAnalyze }: EnquiriesPageProps) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All')
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('All')
@@ -327,6 +334,7 @@ function EnquiriesPage({ reviewedIds, onReview }: EnquiriesPageProps) {
               enquiry={enquiry}
               reviewed={reviewedIds.includes(enquiry.id)}
               onReview={() => onReview(enquiry.id)}
+              onAnalyze={() => onAnalyze(enquiry.id)}
             />
           ))}
         </div>
@@ -522,13 +530,17 @@ function readErrorMessage(payload: unknown): string | null {
   return typeof record.error === 'string' ? record.error : null
 }
 
-function AnalyzePage() {
-  const [customer, setCustomer] = useState('')
-  const [company, setCompany] = useState('')
-  const [channel, setChannel] = useState('')
-  const [subject, setSubject] = useState('')
-  const [summary, setSummary] = useState('')
-  const [received, setReceived] = useState('')
+interface AnalyzePageProps {
+  initial: Enquiry | null
+}
+
+function AnalyzePage({ initial }: AnalyzePageProps) {
+  const [customer, setCustomer] = useState(initial?.customer ?? '')
+  const [company, setCompany] = useState(initial?.company ?? '')
+  const [channel, setChannel] = useState(initial?.channel ?? '')
+  const [subject, setSubject] = useState(initial?.subject ?? '')
+  const [summary, setSummary] = useState(initial?.summary ?? '')
+  const [received, setReceived] = useState(initial?.received ?? '')
   const [status, setStatus] = useState<AnalyzeStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResult | null>(null)
@@ -742,6 +754,7 @@ function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [reviewedIds, setReviewedIds] = useState<string[]>([])
+  const [analyzeId, setAnalyzeId] = useState<string | null>(null)
 
   const unresolved = enquiries.length
   const overdue = enquiries.filter(
@@ -754,15 +767,30 @@ function App() {
   const selected =
     enquiries.find((enquiry) => enquiry.id === selectedId) ?? null
 
+  const analyzeSource =
+    enquiries.find((enquiry) => enquiry.id === analyzeId) ?? null
+
   const markReviewed = (id: string) => {
     setReviewedIds((current) =>
       current.includes(id) ? current : [...current, id],
     )
   }
 
+  const handleNavigate = (next: Page) => {
+    if (next === 'analyze') {
+      setAnalyzeId(null)
+    }
+    setPage(next)
+  }
+
+  const startAnalysis = (id: string) => {
+    setAnalyzeId(id)
+    setPage('analyze')
+  }
+
   return (
     <div className="app">
-      <Sidebar page={page} onNavigate={setPage} />
+      <Sidebar page={page} onNavigate={handleNavigate} />
       <div className="main">
         <Topbar
           title={
@@ -804,6 +832,7 @@ function App() {
                       enquiry={enquiry}
                       reviewed={reviewedIds.includes(enquiry.id)}
                       onReview={() => setSelectedId(enquiry.id)}
+                      onAnalyze={() => startAnalysis(enquiry.id)}
                     />
                   ))}
                 </div>
@@ -813,9 +842,13 @@ function App() {
             <EnquiriesPage
               reviewedIds={reviewedIds}
               onReview={(id) => setSelectedId(id)}
+              onAnalyze={startAnalysis}
             />
           ) : page === 'analyze' ? (
-            <AnalyzePage />
+            <AnalyzePage
+              key={analyzeSource?.id ?? 'new'}
+              initial={analyzeSource}
+            />
           ) : (
             <DraftsPage
               reviewedIds={reviewedIds}
